@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AeroKV generated experiment outputs
+outputs/data/*.csv
+outputs/figures/*.pdf
+outputs/figures/*.png
+!outputs/data/.gitkeep
+!outputs/figures/.gitkeep
