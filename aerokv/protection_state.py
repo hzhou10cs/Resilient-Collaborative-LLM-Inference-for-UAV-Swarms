@@ -26,6 +26,7 @@ from typing import Mapping
 
 from .accounting import (
     activation_buffer_tokens_for_source,
+    effective_snapshot_period,
     latest_snapshot_token_for_source,
     live_overlap_layers_for_source,
     live_overlap_layers_stored_on,
@@ -114,7 +115,7 @@ def plan_sources(plan: ProtectionPlan) -> tuple[int, ...]:
 def source_has_snapshot_tail(plan: ProtectionPlan, source_uav: int) -> bool:
     """Whether the source has a non-empty tail protected by Boundary Snapshot."""
 
-    return plan.snapshot_period[source_uav] is not None and snapshot_tail_layers_for_source(plan, source_uav) > 0
+    return effective_snapshot_period(plan, source_uav) is not None and snapshot_tail_layers_for_source(plan, source_uav) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ def runtime_after_completed_token(system: SystemSpec, plan: ProtectionPlan, toke
     for source_uav in plan_sources(plan):
         if not source_has_snapshot_tail(plan, source_uav):
             continue
-        period = plan.snapshot_period[source_uav]
+        period = effective_snapshot_period(plan, source_uav)
         latest = snapshot_token_at_or_before(token, period)
         assert latest is not None
         latest_snapshot_token[source_uav] = latest
@@ -208,7 +209,7 @@ def validate_runtime_consistency(
 
         latest = runtime.latest_snapshot_token[source_uav]
         buffered = runtime.activation_buffer_tokens[source_uav]
-        period = plan.snapshot_period[source_uav]
+        period = effective_snapshot_period(plan, source_uav)
         assert period is not None
 
         if latest < 0 or latest > token:
@@ -246,7 +247,7 @@ def source_protection_view(
 
     latest = latest_snapshot_token_for_source(plan, source_uav, token, runtime)
     staleness = snapshot_staleness_tokens(token, latest)
-    period = plan.snapshot_period[source_uav]
+    period = effective_snapshot_period(plan, source_uav)
     tail_layers = snapshot_tail_layers_for_source(plan, source_uav)
     active_snapshot = source_has_snapshot_tail(plan, source_uav)
     due = active_snapshot and snapshot_due_at_completed_token(token, period)
@@ -348,7 +349,7 @@ def advance_protection_runtime_for_completed_token(
         if source_uav not in alive or holder not in alive:
             continue
 
-        period = plan.snapshot_period[source_uav]
+        period = effective_snapshot_period(plan, source_uav)
         assert period is not None
 
         prev_latest = previous_runtime.latest_snapshot_token.get(source_uav)
@@ -418,7 +419,7 @@ def validate_runtime_consistency_for_alive_sources(
             raise ValueError(f"active source {source_uav} missing compact runtime state")
         latest = runtime.latest_snapshot_token[source_uav]
         buffered = runtime.activation_buffer_tokens[source_uav]
-        period = plan.snapshot_period[source_uav]
+        period = effective_snapshot_period(plan, source_uav)
         assert period is not None
         if latest < 0 or latest > token:
             raise ValueError(f"invalid latest snapshot token {latest} for source {source_uav}")

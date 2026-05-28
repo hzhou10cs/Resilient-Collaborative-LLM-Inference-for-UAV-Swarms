@@ -223,3 +223,4 @@ outputs/figures/*.pdf
 outputs/figures/*.png
 !outputs/data/.gitkeep
 !outputs/figures/.gitkeep
+outputs/

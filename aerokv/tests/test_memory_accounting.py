@@ -79,17 +79,17 @@ def test_memory_breakdown_for_ring_owner():
     assert br.native_bytes == 2 * (2 + 10 * 16)
     assert br.live_overlap_bytes == 1 * (2 + 10 * 16)  # UAV0 stores source UAV1's head
     assert br.snapshot_bytes == 1 * 8 * 16             # UAV0 stores source UAV2's tail snapshot
-    assert br.activation_buffer_bytes == 2 * 8         # tokens 8..10 activations
-    assert br.total_bytes == 630
+    assert br.activation_buffer_bytes == 0.0         # activation buffer excluded from paper-level memory
+    assert br.total_bytes == 614
 
 
-def test_protected_pipeline_latency_includes_live_overlap_compute():
+def test_protected_pipeline_latency_hides_live_overlap_compute():
     system, plan, _runtime = make_tiny_case()
     br = protected_pipeline_latency_s(system, plan)
-    assert math.isclose(br.stage_latency_by_uav[0], 3 * 0.1)
-    assert math.isclose(br.stage_latency_by_uav[1], 3 * 0.2)
-    assert math.isclose(br.stage_latency_by_uav[2], 3 * 0.3)
-    assert math.isclose(br.pipeline_latency_s, 0.9)
+    assert math.isclose(br.stage_latency_by_uav[0], 2 * 0.1)
+    assert math.isclose(br.stage_latency_by_uav[1], 2 * 0.2)
+    assert math.isclose(br.stage_latency_by_uav[2], 2 * 0.3)
+    assert math.isclose(br.pipeline_latency_s, 1.2)
 
 
 def test_snapshot_tx_bytes_exact_and_average():
@@ -101,6 +101,6 @@ def test_snapshot_tx_bytes_exact_and_average():
 
 if __name__ == "__main__":
     test_memory_breakdown_for_ring_owner()
-    test_protected_pipeline_latency_includes_live_overlap_compute()
+    test_protected_pipeline_latency_hides_live_overlap_compute()
     test_snapshot_tx_bytes_exact_and_average()
     print("accounting tests passed")

@@ -19,6 +19,8 @@ from ..accounting import (
     memory_feasible,
     protected_pipeline_latency_s,
     steady_state_energy_per_token_by_uav_j,
+    runtime_inference_power_w,
+    runtime_per_layer_latency_s,
 )
 from ..specs import ExecutionLayout, LogicalRing, ProtectionPlan, SystemSpec
 from ..protection_state import update_protection_runtime_at_completed_token
@@ -70,7 +72,7 @@ def worst_case_recovery_latency_s(
         return float("inf")
     succ = ring.succ(source_uav)
     load_s = tail_layers * system.model.weight_bytes_per_layer * 8.0 / system.storage_load_bps
-    replay_s = (snapshot_period - 1) * tail_layers * system.uav(succ).per_layer_latency_s
+    replay_s = (snapshot_period - 1) * tail_layers * runtime_per_layer_latency_s(system, succ)
     return load_s + replay_s
 
 
@@ -90,7 +92,7 @@ def _candidate_local_score_j_per_token(
     shard_width = layout.interval(source_uav).width
     k = min(overlap_depth, shard_width)
     tail = max(0, shard_width - k)
-    overlap_compute = system.uav(pred).inference_power_w * k * system.uav(pred).per_layer_latency_s
+    overlap_compute = runtime_inference_power_w(system, pred) * k * runtime_per_layer_latency_s(system, pred)
     tx = 0.0
     if snapshot_period is not None and tail > 0:
         tx = system.uav(source_uav).tx_power_w * tail * system.model.kv_bytes_per_token_layer * 8.0 / system.uav(source_uav).link_bps

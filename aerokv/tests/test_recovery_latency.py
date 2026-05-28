@@ -109,8 +109,8 @@ def test_simulate_with_explicit_failure_and_complete_step_log(tmp_path: Path):
 
     rows = {(row.token, row.uav_id): row for row in out.uav_trace}
     assert rows[(3, 1)].uav_status == "failed"
-    assert rows[(3, 0)].recovered_exec_layers == 1
-    assert rows[(3, 2)].recovered_exec_layers == 1
+    assert rows[(3, 0)].recovered_exec_layers == 0
+    assert rows[(3, 2)].recovered_exec_layers == 0
 
     write_recovery_output(out, tmp_path)
     for name in ("summary.csv", "token_trace.csv", "uav_trace.csv", "step_log.csv"):

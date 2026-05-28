@@ -22,8 +22,6 @@ class MemoryBreakdown:
     live_overlap_bytes: float
     snapshot_bytes: float
     activation_buffer_bytes: float
-    full_mirror_bytes: float = 0.0
-
     @property
     def total_bytes(self) -> float:
         return (
@@ -31,7 +29,6 @@ class MemoryBreakdown:
             + self.live_overlap_bytes
             + self.snapshot_bytes
             + self.activation_buffer_bytes
-            + self.full_mirror_bytes
         )
 
 
@@ -76,6 +73,79 @@ def validate_uav_in_plan(plan: ProtectionPlan, uav_id: int) -> None:
         raise KeyError(f"uav_id {uav_id} is not present in the protection layout")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Energy-aware power / latency model
+# ---------------------------------------------------------------------------
+
+
+def residual_energy_ratio(system: SystemSpec, uav_id: int, energy_j: float | None = None) -> float:
+    """Residual energy ratio E_t / E_0 clipped to [0, 1]."""
+
+    initial = system.uav(uav_id).initial_energy_j
+    if initial <= 0:
+        return 0.0
+    if energy_j is None:
+        energy_j = initial
+    return max(0.0, min(1.0, energy_j / initial))
+
+
+def inference_power_fraction(system: SystemSpec, uav_id: int, energy_j: float | None = None) -> float:
+    """Nonlinear battery-aware inference power fraction.
+
+    Full power is used while residual energy is at least 40%.  Between 40%
+    and 20%, power decays smoothly to 40% of max power.  Below 20%, the UAV
+    stays at the minimum 40% power level.
+    """
+
+    r = residual_energy_ratio(system, uav_id, energy_j)
+    min_frac = 0.40
+    if r >= 0.80:
+        return 1.0
+    if r <= 0.20:
+        return min_frac
+    x = (r - 0.20) / 0.20
+    return min_frac + (1.0 - min_frac) * (x * x)
+
+
+def runtime_inference_power_w(system: SystemSpec, uav_id: int, energy_j: float | None = None) -> float:
+    return system.uav(uav_id).inference_power_w * inference_power_fraction(system, uav_id, energy_j)
+
+
+def runtime_per_layer_latency_s(system: SystemSpec, uav_id: int, energy_j: float | None = None) -> float:
+    frac = max(1e-9, inference_power_fraction(system, uav_id, energy_j))
+    alpha = 0.70
+    return system.uav(uav_id).per_layer_latency_s / (frac ** alpha)
+
+
+# ---------------------------------------------------------------------------
+# Method-specific protection semantics
+# ---------------------------------------------------------------------------
+
+SO_FIXED_SNAPSHOT_PERIOD = 32
+
+
+def _method(plan: ProtectionPlan) -> str:
+    return plan.method.strip().upper()
+
+
+def effective_snapshot_period(plan: ProtectionPlan, source_uav: int) -> int | None:
+    """Return the method-specific snapshot period for one source UAV.
+
+    NP and OO have no snapshots.  SO always uses fixed T_B=32.  AeroKV uses
+    the period selected by its plan/P1.
+    """
+
+    validate_uav_in_plan(plan, source_uav)
+    method = _method(plan)
+    if method == "NP" or method == "OO":
+        return None
+    if method == "SO":
+        return SO_FIXED_SNAPSHOT_PERIOD
+    return plan.snapshot_period[source_uav]
+
+
 # ---------------------------------------------------------------------------
 # Layer ownership / protection geometry
 # ---------------------------------------------------------------------------
@@ -89,18 +159,41 @@ def native_layers(plan: ProtectionPlan, uav_id: int) -> int:
 
 
 def live_overlap_layers_for_source(plan: ProtectionPlan, source_uav: int) -> int:
-    """Leading layers of ``source_uav`` live-overlapped on pred(source)."""
+    """Leading layers of ``source_uav`` live-overlapped on pred(source).
+
+    Method semantics:
+      - NP: no overlap.
+      - OO: overlap-only, using the plan's head depth.
+      - SO: no overlap.
+      - AeroKV/P1-new: use the plan's head depth.
+    """
 
     validate_uav_in_plan(plan, source_uav)
+    method = _method(plan)
+    if method in {"NP", "SO"}:
+        return 0
     shard_width = plan.layout.interval(source_uav).width
     return min(max(plan.head_overlap_depth[source_uav], 0), shard_width)
 
 
 def snapshot_tail_layers_for_source(plan: ProtectionPlan, source_uav: int) -> int:
-    """Tail layers of ``source_uav`` protected by Boundary Snapshot on succ(source)."""
+    """Layers of ``source_uav`` protected by snapshot on succ(source).
+
+    Method semantics:
+      - NP: no snapshot.
+      - OO: no snapshot.
+      - SO: full source shard snapshot with fixed T_B=32.
+      - AeroKV/P1-new: tail after the live-overlapped head.
+    """
 
     validate_uav_in_plan(plan, source_uav)
-    return max(0, plan.layout.interval(source_uav).width - live_overlap_layers_for_source(plan, source_uav))
+    method = _method(plan)
+    shard_width = plan.layout.interval(source_uav).width
+    if method in {"NP", "OO"}:
+        return 0
+    if method == "SO":
+        return shard_width
+    return max(0, shard_width - live_overlap_layers_for_source(plan, source_uav))
 
 
 def live_overlap_source_for_owner(plan: ProtectionPlan, owner_uav: int) -> int:
@@ -122,7 +215,7 @@ def live_overlap_layers_stored_on(plan: ProtectionPlan, owner_uav: int) -> int:
 
 def snapshot_layers_stored_on(plan: ProtectionPlan, owner_uav: int) -> int:
     source = snapshot_source_for_owner(plan, owner_uav)
-    if plan.snapshot_period[source] is None:
+    if effective_snapshot_period(plan, source) is None:
         return 0
     return snapshot_tail_layers_for_source(plan, source)
 
@@ -166,7 +259,7 @@ def activation_buffer_tokens_for_source(
 ) -> int:
     """Tokens buffered since the latest snapshot for a source's snapshot tail."""
 
-    period = plan.snapshot_period[source_uav]
+    period = effective_snapshot_period(plan, source_uav)
     if period is None or snapshot_tail_layers_for_source(plan, source_uav) == 0:
         return 0
     if runtime is not None and source_uav in runtime.activation_buffer_tokens:
@@ -184,7 +277,7 @@ def latest_snapshot_token_for_source(
 ) -> int | None:
     """Latest snapshot token for ``source_uav`` using runtime state if available."""
 
-    period = plan.snapshot_period[source_uav]
+    period = effective_snapshot_period(plan, source_uav)
     if period is None or snapshot_tail_layers_for_source(plan, source_uav) == 0:
         return None
     if runtime is not None and source_uav in runtime.latest_snapshot_token:
@@ -208,7 +301,7 @@ def snapshot_tx_bytes_at_completed_token(
     """
 
     validate_token(system, token)
-    period = plan.snapshot_period[source_uav]
+    period = effective_snapshot_period(plan, source_uav)
     if period is None or not snapshot_due_at_completed_token(token, period):
         return 0
     tail_layers = snapshot_tail_layers_for_source(plan, source_uav)
@@ -223,15 +316,10 @@ def average_snapshot_tx_bytes_per_token(
     """Average per-token TX payload for the source's snapshot stream.
 
     For periodic Boundary Snapshot, this equals one token of KV for each tail
-    layer.  For the ideal full-mirror reference, this mirrors the old
-    non-deployable reference model: repeatedly transmit the growing native KV,
-    whose generation-average payload is width * kv * n_est / 2 per token.
+    layer.
     """
 
-    if plan.full_mirror:
-        width = plan.layout.interval(source_uav).width
-        return width * system.model.kv_bytes_per_token_layer * system.model.n_est / 2.0
-    if plan.snapshot_period[source_uav] is None:
+    if effective_snapshot_period(plan, source_uav) is None:
         return 0.0
     return snapshot_tail_layers_for_source(plan, source_uav) * system.model.kv_bytes_per_token_layer
 
@@ -252,8 +340,7 @@ def memory_breakdown_bytes(
 
     Native and live-overlap memory include weights and KV.  Snapshot memory
     stores KV only.  The boundary activation buffer stores activations since the
-    latest snapshot.  Full mirror memory, when enabled, stores the successor's
-    native KV only, matching the old reference convention.
+    latest snapshot.
     """
 
     validate_token(system, token)
@@ -270,20 +357,13 @@ def memory_breakdown_bytes(
     snapshot_layers = snapshot_layers_stored_on(plan, uav_id)
     snapshot = 0.0 if latest is None else snapshot_layers * latest * model.kv_bytes_per_token_layer
 
-    activation_tokens = activation_buffer_tokens_for_source(plan, snapshot_source, token, runtime)
-    activation_buffer = activation_tokens * model.activation_bytes if snapshot_layers > 0 else 0.0
-
-    full_mirror = 0.0
-    if plan.full_mirror:
-        mirror_source = plan.ring.succ(uav_id)
-        full_mirror = plan.layout.interval(mirror_source).width * token * model.kv_bytes_per_token_layer
+    activation_buffer = 0.0
 
     return MemoryBreakdown(
         native_bytes=float(native),
         live_overlap_bytes=float(live_overlap),
         snapshot_bytes=float(snapshot),
         activation_buffer_bytes=float(activation_buffer),
-        full_mirror_bytes=float(full_mirror),
     )
 
 
@@ -314,14 +394,20 @@ def memory_feasible(
 # ---------------------------------------------------------------------------
 
 
-def execution_stage_latency_s(system: SystemSpec, layout: ExecutionLayout, uav_id: int) -> float:
+def execution_stage_latency_s(system: SystemSpec, layout: ExecutionLayout, uav_id: int, energy_j: float | None = None) -> float:
     layers = layout.interval(uav_id).width
-    return layers * system.uav(uav_id).per_layer_latency_s
+    return layers * runtime_per_layer_latency_s(system, uav_id, energy_j)
 
 
 def protected_stage_latency_s(system: SystemSpec, plan: ProtectionPlan, uav_id: int) -> float:
-    layers = native_layers(plan, uav_id) + live_overlap_layers_stored_on(plan, uav_id)
-    return layers * system.uav(uav_id).per_layer_latency_s
+    """Stage latency with live-overlap compute hidden in pipeline bubbles.
+
+    The protected stage latency is the native execution latency only.  Live
+    overlap still consumes compute energy and memory, but under the paper's
+    simplified bubble model it does not reduce the main decode throughput.
+    """
+
+    return execution_stage_latency_s(system, plan.layout, uav_id)
 
 
 def pipeline_latency_s(
@@ -332,13 +418,13 @@ def pipeline_latency_s(
     if active_uavs is None:
         active_uavs = layout.executing_uavs()
     stage = {uav_id: execution_stage_latency_s(system, layout, uav_id) for uav_id in active_uavs}
-    return LatencyBreakdown(stage_latency_by_uav=stage, pipeline_latency_s=max(stage.values()) if stage else 0.0)
+    return LatencyBreakdown(stage_latency_by_uav=stage, pipeline_latency_s=sum(stage.values()) if stage else 0.0)
 
 
 def protected_pipeline_latency_s(system: SystemSpec, plan: ProtectionPlan) -> LatencyBreakdown:
     active_uavs = plan.layout.executing_uavs()
     stage = {uav_id: protected_stage_latency_s(system, plan, uav_id) for uav_id in active_uavs}
-    return LatencyBreakdown(stage_latency_by_uav=stage, pipeline_latency_s=max(stage.values()) if stage else 0.0)
+    return LatencyBreakdown(stage_latency_by_uav=stage, pipeline_latency_s=sum(stage.values()) if stage else 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +432,14 @@ def protected_pipeline_latency_s(system: SystemSpec, plan: ProtectionPlan) -> La
 # ---------------------------------------------------------------------------
 
 
-def compute_energy_for_layers_per_token_j(system: SystemSpec, uav_id: int, layers: int) -> float:
+def compute_energy_for_layers_per_token_j(
+    system: SystemSpec, uav_id: int, layers: int, energy_j: float | None = None
+) -> float:
     if layers < 0:
         raise ValueError("layers must be non-negative")
-    uav = system.uav(uav_id)
-    return uav.inference_power_w * layers * uav.per_layer_latency_s
+    power = runtime_inference_power_w(system, uav_id, energy_j)
+    latency = runtime_per_layer_latency_s(system, uav_id, energy_j)
+    return power * layers * latency
 
 
 def execution_compute_energy_per_token_j(system: SystemSpec, layout: ExecutionLayout, uav_id: int) -> float:

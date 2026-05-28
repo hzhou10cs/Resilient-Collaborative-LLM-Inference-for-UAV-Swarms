@@ -26,6 +26,7 @@ class TokenTraceRow:
     total_memory_bytes: float
     max_memory_bytes: float
     remaining_tokens: int
+    system_expected_remaining_tokens: float
     cumulative_compute_energy_j: float
     cumulative_flight_energy_j: float
     cumulative_tx_energy_j: float
@@ -60,6 +61,7 @@ class UAVTraceRow:
     snapshot_staleness_tokens: int | None
     activation_buffer_tokens: int
     stage_latency_s: float
+    expected_remaining_tokens: float
     recovered_exec_layers: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,6 +115,7 @@ class SummaryRow:
     failure_trace: str = "[]"
     expected_failures_per_task: float | None = None
     total_recovery_latency_s: float = 0.0
+    final_system_expected_remaining_tokens: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

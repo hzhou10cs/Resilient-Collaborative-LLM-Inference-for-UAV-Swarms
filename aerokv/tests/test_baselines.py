@@ -68,8 +68,8 @@ def test_standard_pre_failure_row_counts_and_time():
     assert result.token_trace[0].token == 0
     assert result.token_trace[0].time_s == 0.0
     assert result.token_trace[-1].token == 5
-    assert math.isclose(result.token_trace[-1].time_s, 4.5)
-    assert math.isclose(result.summary.mission_complete_s, 4.5)
+    assert math.isclose(result.token_trace[-1].time_s, 6.0)
+    assert math.isclose(result.summary.mission_complete_s, 6.0)
 
 
 def test_standard_pre_failure_energy_and_tx_bursts():
@@ -77,7 +77,7 @@ def test_standard_pre_failure_energy_and_tx_bursts():
     result = simulate_fixed_plan_prefailure(system, plan, run_id="tiny")
 
     token1 = result.token_trace[1]
-    assert math.isclose(token1.cumulative_flight_energy_j, 27.0)
+    assert math.isclose(token1.cumulative_flight_energy_j, 36.0)
     assert math.isclose(token1.cumulative_compute_energy_j, 9.0)
     assert math.isclose(token1.cumulative_tx_energy_j, 0.0)
 
@@ -87,7 +87,7 @@ def test_standard_pre_failure_energy_and_tx_bursts():
     assert math.isclose(token2.cumulative_tx_energy_j, 15.36)
 
     assert math.isclose(result.summary.tx_energy_j, 30.72)
-    assert math.isclose(result.summary.terminal_min_energy_j, 922.26)
+    assert math.isclose(result.summary.terminal_min_energy_j, 907.26)
 
 
 def test_standard_pre_failure_uav_trace_contains_holder_view():
@@ -107,7 +107,7 @@ def test_standard_pre_failure_uav_trace_contains_holder_view():
     assert uav1_t2.latest_snapshot_token == 2
     assert uav1_t2.snapshot_staleness_tokens == 0
     assert uav1_t2.activation_buffer_tokens == 0
-    assert math.isclose(uav1_t2.stage_latency_s, 0.6)
+    assert math.isclose(uav1_t2.stage_latency_s, 0.4)
     assert math.isclose(uav1_t2.memory_bytes, 134.0)
 
     uav1_t3 = rows[(3, 1)]

@@ -25,17 +25,21 @@ class ExperimentConfig:
 
     # UAV resources.
     memory_budget_gb: float = 12.0
-    energy_budget_kj_range: tuple[float, float] = (120.0, 180.0)
-    flight_power_w_range: tuple[float, float] = (100.0, 160.0)
-    inference_power_w_range: tuple[float, float] = (15.0, 35.0)
+    energy_budget_kj_range: tuple[float, float] = (1800.0, 3600.0)
+    # Deterministic power/latency model. These are max-power hardware constants;
+    # runtime inference power and per-layer latency are derived from residual energy.
+    flight_power_w: float = 80.0
+    inference_power_max_w: float = 35.0
+    inference_power_min_fraction: float = 0.40
+    per_layer_latency_min_ms: float = 8.0
+    power_latency_alpha: float = 0.70
     tx_power_w: float = 2.5
-    per_layer_latency_ms_range: tuple[float, float] = (8.0, 14.0)
-    link_rate_mbps_range: tuple[float, float] = (200.0, 800.0)
+    link_rate_mbps_range: tuple[float, float] = (15.0, 30.0)
 
     # Recovery and failure settings.
     tau_recover_max_s: float = 3.0
     storage_load_gbps: float = 16.0
-    snapshot_period_candidates: tuple[int, ...] = (16, 32, 64, 128, 256, 512, 1024)
+    snapshot_period_candidates: tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
     expected_failures_per_task: float = 2.5
 
     @property

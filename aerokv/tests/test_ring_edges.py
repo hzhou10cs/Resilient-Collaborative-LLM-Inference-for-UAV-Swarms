@@ -142,8 +142,8 @@ def test_runtime_feeds_memory_accounting():
     assert br.native_bytes == 2 * (2 + 5 * 16)
     assert br.live_overlap_bytes == 1 * (2 + 5 * 16)  # UAV1 stores source UAV2's head
     assert br.snapshot_bytes == 1 * 4 * 16             # UAV1 stores source UAV0's tail snapshot
-    assert br.activation_buffer_bytes == 1 * 8         # token 5 activation buffered since snapshot 4
-    assert math.isclose(br.total_bytes, 318.0)
+    assert br.activation_buffer_bytes == 0.0         # activation buffer excluded from paper-level memory
+    assert math.isclose(br.total_bytes, 310.0)
 
 
 if __name__ == "__main__":

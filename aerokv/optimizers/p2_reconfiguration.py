@@ -10,10 +10,12 @@ AeroKV state sources:
 - a snapshot-recoverable tail shard that it holds for its ring predecessor;
 - a layer interval already recovered onto the UAV by the recovery step.
 
-The solver returns a contiguous exact-cover layout over surviving UAVs.  It uses
-a small dynamic program over layer boundaries and chooses the feasible layout
-with the minimum maximum stage latency.  Reconfiguration data movement is not
-modeled here; illegal movement is rejected rather than hidden behind a fallback.
+The solver returns a contiguous exact-cover layout over surviving UAVs.  Each
+active surviving UAV must receive at least one layer; zero-width assignments are
+rejected because they create invalid ring/protection semantics after P1-new.
+It uses a small dynamic program over layer boundaries and chooses the feasible
+layout with the minimum maximum stage latency.  Reconfiguration data movement is
+not modeled here; illegal movement is rejected rather than hidden behind a fallback.
 """
 
 from __future__ import annotations
@@ -164,28 +166,42 @@ def solve_p2_reconfiguration(
         return P2Result(False, "no_active_uavs_in_layout", tuple(), None, 0.0, {}, availability)
 
     num_layers = system.model.num_layers
+    if len(active) > num_layers:
+        return P2Result(
+            False,
+            "not_enough_layers_for_min_one_layer_per_active_uav",
+            active,
+            None,
+            0.0,
+            {},
+            availability,
+        )
     inf = float("inf")
 
     # dp[i][b] is best max-stage-latency after assigning layers [0,b) to the
-    # first i active UAVs.  Parent stores the previous boundary a.
+    # first i active UAVs.  Parent stores the previous boundary a.  Because
+    # every active UAV must receive at least one layer, feasible states satisfy
+    # b >= i and each transition interval [a,b) has width >= 1.
     dp = [[inf] * (num_layers + 1) for _ in range(len(active) + 1)]
     parent: list[list[int | None]] = [[None] * (num_layers + 1) for _ in range(len(active) + 1)]
     dp[0][0] = 0.0
 
     for i, uav_id in enumerate(active, start=1):
         per_layer = system.uav(uav_id).per_layer_latency_s
-        for b in range(0, num_layers + 1):
-            for a in range(0, b + 1):
+        # At least i layers must have been assigned to the first i active UAVs.
+        for b in range(i, num_layers + 1):
+            # Previous boundary must leave at least one layer for current UAV.
+            # It must also leave at least one layer per previous active UAV.
+            for a in range(i - 1, b):
                 if dp[i - 1][a] == inf:
                     continue
                 interval = LayerInterval(a, b)
-                # Allow zero-width intervals only if needed for exact cover with
-                # more UAVs than layers.  They carry zero stage latency.
-                if interval.width > 0:
-                    if not availability.can_claim(uav_id, interval):
-                        continue
-                    if not _memory_ok_for_assignment(system, uav_id, interval, token):
-                        continue
+                if interval.width < 1:
+                    continue
+                if not availability.can_claim(uav_id, interval):
+                    continue
+                if not _memory_ok_for_assignment(system, uav_id, interval, token):
+                    continue
                 stage = interval.width * per_layer
                 value = max(dp[i - 1][a], stage)
                 if value < dp[i][b]:
@@ -203,6 +219,9 @@ def solve_p2_reconfiguration(
             return P2Result(False, "missing_dp_parent", active, None, 0.0, {}, availability)
         intervals[active[i - 1]] = LayerInterval(a, b)
         b = a
+
+    if any(interval.width < 1 for interval in intervals.values()):
+        return P2Result(False, "zero_width_assignment_forbidden", active, None, 0.0, {}, availability)
 
     layout = ExecutionLayout(intervals)
     try:

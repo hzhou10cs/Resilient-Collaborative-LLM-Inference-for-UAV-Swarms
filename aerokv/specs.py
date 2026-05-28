@@ -215,8 +215,6 @@ class ProtectionPlan:
     ring: LogicalRing
     head_overlap_depth: Mapping[int, int]
     snapshot_period: Mapping[int, int | None]
-    full_mirror: bool = False
-
     def validate_against(self, system: SystemSpec) -> None:
         self.layout.validate_exact_cover(system.model.num_layers)
         expected = set(self.layout.intervals.keys())

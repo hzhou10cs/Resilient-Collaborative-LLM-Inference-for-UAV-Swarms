@@ -7,22 +7,28 @@ from collections.abc import Iterable
 from .traces import TokenTraceRow, UAVTraceRow
 
 
+def final_token_uav_rows(rows: Iterable[UAVTraceRow]) -> list[UAVTraceRow]:
+    rows = list(rows)
+    if not rows:
+        return []
+    final_token = max(r.token for r in rows)
+    return [r for r in rows if r.token == final_token]
+
+
 def mean_residual_energy_j(rows: Iterable[UAVTraceRow]) -> float:
     values = [r.energy_j for r in rows if r.uav_status != "failed"]
     return sum(values) / len(values) if values else 0.0
 
 
-def expected_remaining_token_capacity(rows: Iterable[UAVTraceRow], pipeline_latency_s: float) -> float:
-    if pipeline_latency_s <= 0:
-        return 0.0
-    caps = []
-    for r in rows:
-        if r.uav_status == "failed":
-            continue
-        per_token = r.flight_energy_j + r.compute_energy_j + r.tx_energy_j
-        if per_token > 0:
-            caps.append(r.energy_j / per_token)
-    return min(caps) if caps else 0.0
+def system_expected_remaining_tokens(rows: Iterable[UAVTraceRow]) -> float:
+    """Compute system expected remaining tokens from one token's UAV rows.
+
+    The system value is the minimum per-UAV capacity among non-failed UAVs.
+    This matches the value written in ``TokenTraceRow.system_expected_remaining_tokens``.
+    """
+
+    values = [r.expected_remaining_tokens for r in rows if r.uav_status != "failed"]
+    return min(values) if values else 0.0
 
 
 def cumulative_completion_time_s(rows: Iterable[TokenTraceRow]) -> float:

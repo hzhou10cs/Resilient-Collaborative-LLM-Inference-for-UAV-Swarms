@@ -1,140 +1,320 @@
-# AeroKV Simulator
+# Resilient Collaborative LLM Inference for UAV Swarms
 
-This repository contains a single-threaded AeroKV simulator for resilient collaborative LLM/VLM inference on UAV swarms. The implementation is organized around explicit system specifications, layer layouts, logical-ring protection state, accounting formulas, recovery, and optimization modules.
+This repository contains a single-threaded simulator for evaluating resilient collaborative LLM inference over a logical UAV ring.  The current implementation compares four methods:
 
-## Directory layout
+- `NP`: no proactive protection; after a failure, the system performs hard recovery.
+- `OO`: overlap-only protection; each UAV maintains live overlap for its successor.
+- `SO`: snapshot-only protection; full-shard snapshot baseline with a fixed snapshot period.
+- `AeroKV`: live head overlap plus boundary snapshot, with P1 provisioning before execution and P2/P1-new after failures.
+
+The simulator is intended for reproducible experiments and debugging, not real-time deployment.
+
+## Repository layout
 
 ```text
 aerokv/
-  config.py
-  specs.py
-  layout.py
-  topology.py
-  protection_state.py
-  accounting.py
-  recovery.py
-  baselines.py
+  config.py                         # Global experiment defaults.
+  specs.py                          # Core dataclasses: model, UAV, layout, ring, runtime state.
+  layout.py                         # Layout helpers, if present in your checkout.
+  topology.py                       # LogicalRing export / topology compatibility layer.
+  protection_state.py               # Runtime snapshot freshness and protection-state updates.
+  accounting.py                     # Memory, energy, latency, snapshot, and runtime power formulas.
+  recovery.py                       # Method-specific failure recovery accounting.
+  baselines.py                      # NP / OO / SO / AeroKV initial plan construction.
 
   optimizers/
-    p1_provisioning.py
-    p2_reconfiguration.py
-    p1_new.py
+    p1_provisioning.py              # P1 provisioning: choose K and T_B using candidate search.
+    p2_reconfiguration.py           # State-constrained P2 post-failure reconfiguration.
+    p1_new.py                       # P1-new provisioning after P2 layout.
 
   simulation/
-    events.py
-    engine.py
-    traces.py
-    metrics.py
+    events.py                       # Failure event representation and Poisson failure schedules.
+    engine.py                       # Main single-threaded simulation loop.
+    traces.py                       # CSV row schemas for summary/token/UAV/step logs.
+    metrics.py                      # Experiment result aggregation helpers, if present.
 
   experiments/
-    scenarios.py
-    exp1.py
-    exp2.py
-    exp3.py
+    scenarios.py                    # Standard system construction.
+    _common.py                      # Shared experiment utilities and result-table printing.
+    exp1.py                         # Experiment 1 entry point.
+    exp2.py                         # Experiment 2 entry point.
+    exp3.py                         # Experiment 3 entry point.
 
   tests/
     test_memory_accounting.py
     test_recovery_latency.py
     test_p1_feasibility.py
     test_p2_state_constraints.py
+    test_p2_min_one_layer.py
     test_ring_edges.py
     test_baselines.py
 ```
 
-## Paper-aligned default parameters
+## Main modeling assumptions
 
-The defaults in `aerokv/config.py` follow the latest conference draft experiment section:
+### Energy and latency
+
+The current runtime model uses battery-aware inference power and per-layer latency.  The high-level intended behavior is:
+
+- When remaining battery is above 40%, inference runs at full power.
+- Between 20% and 40%, inference power decays nonlinearly.
+- At or below 20%, inference reaches its minimum power fraction.
+- Per-layer latency increases as inference power decreases.
+
+Flight power is fixed by the scenario configuration, currently intended to be `80 W` per UAV.  Communication energy is TX-only.  RX energy is not modeled.
+
+### Pipeline latency
+
+Live-overlap compute is hidden in the simplified bubble model.  It still consumes compute energy and memory, but it should not directly add to the main decode pipeline latency.
+
+The simulation engine uses its configured pipeline-latency calculation for token-time advance.  When debugging latency behavior, inspect:
 
 ```text
-UAV count:                 16
-Generated tokens/task:      8192
-Base model:                 Qwen-VL-32B
-Decoder layers:             64
-Hidden size:                12288
-KV footprint:               4 KB per token per layer
-Inference memory budget:    12 GB per UAV
-Initial energy:             uniform [120, 180] kJ
-Flight-maintenance power:   uniform [100, 160] W
-Inference power:            uniform [15, 35] W
-TX power:                   2.5 W
-Logical-ring link rate:     uniform [200, 800] Mbps
-Recovery deadline:          3.0 s
-Failure process:            token-space Poisson process
-Expected failures/task:     2.5 by default
+aerokv/accounting.py
+aerokv/simulation/engine.py
 ```
 
-The simulator models TX-side communication energy only. It does not introduce RX energy, bottleneck flags, event-log output, or multiprocessing.
+### Memory
 
-## Core conventions
+Memory follows the paper-level model: native weights/KV, live-overlap weights/KV, and snapshot KV.  Activation-buffer memory is intentionally not counted in the main memory budget unless explicitly reintroduced.
 
-Token convention:
+### Recovery and reconfiguration
+
+AeroKV failure path:
 
 ```text
-token = 0      initial state before generation
-token = t > 0  state after completing t generated tokens
+failure
+→ recovery
+→ P2 state-constrained reconfiguration
+→ P1-new protection rebuilding
+→ continue execution
 ```
 
-Failure convention:
+For simplification, P2/P1-new planner latency is modeled as zero and reconfiguration energy is currently treated as a fixed overhead, e.g. `200 J`, rather than detailed data-movement accounting.
+
+NP / OO / SO use method-specific recovery.  After a failure, the surviving logical ring should be rewired so that predecessor/successor relationships skip failed UAVs.
+
+### P2 minimum shard width
+
+P2 now enforces a minimum of one layer per active surviving UAV.  Zero-width intervals are forbidden because they create invalid post-failure ring/protection semantics after P1-new.  If there are more active UAVs than model layers, P2 returns an invalid result rather than assigning empty shards.
+
+## Key configuration settings
+
+Most defaults are in:
 
 ```text
-A failure at token t occurs after token t completes and before token t+1 starts.
+aerokv/config.py
+aerokv/experiments/scenarios.py
 ```
 
-AeroKV protection direction:
+Important fields to check before running experiments:
 
-```text
-Source UAV i:
-  head overlap is stored/computed on pred(i)
-  tail snapshot is stored on succ(i)
+```python
+num_uavs
+num_layers
+n_est
+memory_budget_gb
+initial_energy_j or energy budget setting
+flight_power_w
+link_rate_mbps_range
+snapshot_period_candidates
+expected_failures_per_task
+tau_recover_max_s
+```
 
-Holder UAV i:
-  stores/computes succ(i)'s head overlap
-  stores pred(i)'s tail snapshot
+Current recommended snapshot candidate set for AeroKV P1:
+
+```python
+snapshot_period_candidates = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
+```
+
+SO is usually configured as a full-shard snapshot baseline with fixed `T_B = 32`, unless an experiment intentionally sweeps it.
+
+## Installing and running
+
+From the repository root:
+
+```bash
+python -m pip install -U pytest
+```
+
+No GPU or LLM runtime is required; this is a metadata/energy/latency simulator.
+
+Run tests:
+
+```bash
+PYTHONPATH=. pytest -q aerokv/tests
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:PYTHONPATH='.'
+pytest -q aerokv/tests
 ```
 
 ## Running experiments
 
-Experiment 1: overall end-to-end performance under the same failure trace.
+### Experiment 1
 
 ```bash
 PYTHONPATH=. python -m aerokv.experiments.exp1 --seed 2026 --output-dir outputs/exp1
-# or
-PYTHONPATH=. python -m aerokv.experiments.run_fig1_lifetime --seed 2026
 ```
 
-Experiment 2: recovery communication overhead comparison.
+Windows PowerShell:
+
+```powershell
+$env:PYTHONPATH='.'
+python -m aerokv.experiments.exp1 --seed 2026 --output-dir outputs/exp1
+```
+
+Disable progress display:
+
+```bash
+PYTHONPATH=. python -m aerokv.experiments.exp1 --seed 2026 --output-dir outputs/exp1 --no-progress
+```
+
+Expected console output is a compact table like:
+
+```text
+Experiment 1 main results
+method  avg_remaining_energy_j  task_time_cost_s  predicted_remaining_tokens
+NP                         ...               ...                       ...
+OO                         ...               ...                       ...
+SO                         ...               ...                       ...
+AeroKV                     ...               ...                       ...
+```
+
+### Experiment 2
 
 ```bash
 PYTHONPATH=. python -m aerokv.experiments.exp2 --seed 2026 --output-dir outputs/exp2
-# or
-PYTHONPATH=. python -m aerokv.experiments.run_fig2_tradeoff --seed 2026
 ```
 
-Experiment 3: ablation study.
+Use `--no-progress` for quieter output.
+
+### Experiment 3
 
 ```bash
 PYTHONPATH=. python -m aerokv.experiments.exp3 --seed 2026 --output-dir outputs/exp3
-# or
-PYTHONPATH=. python -m aerokv.experiments.run_fig3_reconfiguration --seed 2026
 ```
 
-## Outputs
+Use `--no-progress` for quieter output.
 
-The recovery-enabled engine writes:
+## Output files
+
+Each run writes CSVs under the selected output directory.  Depending on the experiment, files may be nested by method or setting.
+
+Common files:
 
 ```text
-summary.csv
- token_trace.csv
- uav_trace.csv
- step_log.csv
+summary.csv       # One-row or aggregated summary for the run.
+token_trace.csv   # Per-token system state.
+uav_trace.csv     # Per-token-per-UAV state.
+step_log.csv      # Per-token concise log state used for progress/debugging.
 ```
 
-`step_log.csv` is complete per-token logging. Console progress, when enabled, prints one concise line every 20 tokens.
+Important columns:
 
-## Tests
+```text
+summary.csv:
+  method
+  mission_success
+  invalid_reason
+  task_time_cost_s or mission_complete_s
+  terminal_min_energy_j
+  final_system_expected_remaining_tokens
+  recovery_latency_s
+  reconfiguration_latency_s
+  reconfiguration_energy_j
+  failure_trace
 
-```bash
-PYTHONPATH=. pytest -q
+token_trace.csv:
+  token
+  time_s
+  phase
+  num_alive_uavs
+  pipeline_latency_s
+  min_energy_j
+  total_energy_j
+  total_memory_bytes
+  max_memory_bytes
+  system_expected_remaining_tokens
+  failure_history
+
+uav_trace.csv:
+  token
+  uav_id
+  uav_status
+  energy_j
+  memory_bytes
+  num_exec_layers
+  live_overlap_layers
+  snapshot_layers
+  latest_snapshot_token
+  expected_remaining_tokens
+  recovered_exec_layers
 ```
 
-The current test suite checks memory accounting, recovery latency, P1 feasibility, P2 state constraints, ring direction conventions, and baseline/simulator behavior.
+## Debugging guide
+
+### If a method appears faster than AeroKV
+
+Check whether it completed the whole task or failed early.  A failed method may have a smaller `task_time_cost_s` simply because it stopped before generating all tokens.  Inspect:
+
+```text
+summary.csv: mission_success, invalid_reason, failure_trace
+token_trace.csv: final token, phase, remaining_tokens
+```
+
+### If AeroKV exits early
+
+Look at:
+
+```text
+summary.csv: invalid_reason
+token_trace.csv: last row phase/failure_history
+uav_trace.csv: final num_exec_layers and energy_j
+```
+
+Common causes:
+
+```text
+recovery_failed
+p2_reconfiguration_failed
+p1_new_failed
+memory_budget_exceeded
+energy_depleted
+```
+
+### If 0-layer UAVs appear
+
+This should no longer occur after this patch.  P2 enforces minimum one layer per active UAV.  If it reappears, inspect:
+
+```text
+aerokv/optimizers/p2_reconfiguration.py
+```
+
+and check whether another code path is constructing post-failure layouts outside P2.
+
+### If baselines fail after multiple failures
+
+Verify ring rewiring.  After UAV `i` fails, the surviving ring should remove `i`, so predecessor/successor skip the failed node.  Relevant files:
+
+```text
+aerokv/specs.py              # LogicalRing.remove
+aerokv/simulation/engine.py  # When ring/layout/plan are updated after recovery
+aerokv/recovery.py           # Method-specific recovery using current ring
+```
+
+### If memory looks too small
+
+This is expected under the current paper parameters.  With `4 KB/token/layer` and `8192` tokens, one layer of full KV history is about `32 MB`; with roughly four layers per UAV, native KV is roughly `128 MB`, much smaller than model weights and a 12 GB memory budget.
+
+## Development notes
+
+- Keep planner logic out of accounting formulas.
+- Keep experiment result printing in `experiments/_common.py`.
+- Do not reintroduce `Ideal Full Mirror` unless its semantics and memory/energy accounting are explicitly defined.
+- Do not count live-overlap compute as pipeline latency unless the bubble model is replaced by a more detailed scheduler.
+- Do not allow P2 zero-width intervals in the standard experiments.

@@ -44,9 +44,9 @@ def make_standard_system(seed: int = 2026, config=None) -> SystemSpec:
             uav_id=i,
             memory_budget_bytes=cfg.memory_budget_bytes,
             initial_energy_j=float(rng.uniform(*cfg.energy_budget_kj_range) * 1000.0),
-            flight_power_w=float(rng.uniform(*cfg.flight_power_w_range)),
-            inference_power_w=float(rng.uniform(*cfg.inference_power_w_range)),
-            per_layer_latency_s=float(rng.uniform(*cfg.per_layer_latency_ms_range) / 1000.0),
+            flight_power_w=float(cfg.flight_power_w),
+            inference_power_w=float(cfg.inference_power_max_w),
+            per_layer_latency_s=float(cfg.per_layer_latency_min_ms / 1000.0),
             link_bps=float(rng.uniform(*cfg.link_rate_mbps_range) * 1e6),
             tx_power_w=cfg.tx_power_w,
         )
