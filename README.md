@@ -1,55 +1,140 @@
-# AeroKV rewrite layer 5
+# AeroKV Simulator
 
-This layer adds the final two planned components without changing the trace schema or adding threading:
+This repository contains a single-threaded AeroKV simulator for resilient collaborative LLM/VLM inference on UAV swarms. The implementation is organized around explicit system specifications, layer layouts, logical-ring protection state, accounting formulas, recovery, and optimization modules.
 
-- `aerokv2/p2_reconfiguration.py`
-- `aerokv2/p1_provisioning.py`
-- `aerokv2/p1_new.py`
+## Directory layout
 
-It also extends `RecoveryResult` with `recovered_intervals_by_uav`, because P2 needs exact layer intervals rather than only recovered layer counts.
+```text
+aerokv/
+  config.py
+  specs.py
+  layout.py
+  topology.py
+  protection_state.py
+  accounting.py
+  recovery.py
+  baselines.py
 
-## P2 semantics
+  optimizers/
+    p1_provisioning.py
+    p2_reconfiguration.py
+    p1_new.py
 
-`solve_p2_reconfiguration(...)` is state-constrained. A surviving UAV may claim a layer only if that layer is available from one of these sources:
+  simulation/
+    events.py
+    engine.py
+    traces.py
+    metrics.py
 
-1. its own native shard;
-2. the live-overlapped head of its ring successor;
-3. the snapshot-recoverable tail of its ring predecessor;
-4. intervals already materialized by the recovery step.
+  experiments/
+    scenarios.py
+    exp1.py
+    exp2.py
+    exp3.py
 
-There is no unconstrained uniform fallback. If no exact state-constrained cover exists, the result is invalid and `layout` is `None`.
+  tests/
+    test_memory_accounting.py
+    test_recovery_latency.py
+    test_p1_feasibility.py
+    test_p2_state_constraints.py
+    test_ring_edges.py
+    test_baselines.py
+```
 
-The objective is minimal maximum stage latency over feasible contiguous exact-cover layouts.
+## Paper-aligned default parameters
 
-## P1 semantics
+The defaults in `aerokv/config.py` follow the latest conference draft experiment section:
 
-`solve_p1_provisioning(...)` performs deadline-guided candidate generation and bounded joint beam search. It returns only globally validated plans:
+```text
+UAV count:                 16
+Generated tokens/task:      8192
+Base model:                 Qwen-VL-32B
+Decoder layers:             64
+Hidden size:                12288
+KV footprint:               4 KB per token per layer
+Inference memory budget:    12 GB per UAV
+Initial energy:             uniform [120, 180] kJ
+Flight-maintenance power:   uniform [100, 160] W
+Inference power:            uniform [15, 35] W
+TX power:                   2.5 W
+Logical-ring link rate:     uniform [200, 800] Mbps
+Recovery deadline:          3.0 s
+Failure process:            token-space Poisson process
+Expected failures/task:     2.5 by default
+```
 
-- memory feasible at `n_est`;
-- worst-case recovery latency within `tau_recover_max_s`;
-- objective is max-min pre-failure lifetime under protected steady-state energy.
+The simulator models TX-side communication energy only. It does not introduce RX energy, bottleneck flags, event-log output, or multiprocessing.
 
-This is not the old per-UAV independent greedy planner.
+## Core conventions
 
-## P1-new semantics
+Token convention:
 
-`solve_p1_new(...)` re-solves P1 on the P2 layout and a surviving logical ring whose order follows the P2 active-UAV order.
+```text
+token = 0      initial state before generation
+token = t > 0  state after completing t generated tokens
+```
 
-## Current integration status
+Failure convention:
 
-The modules are implemented and tested as standalone layers. `sim_recovery.py` remains the previous fixed-plan recovery simulator; it does not automatically call P2 or P1-new yet. That integration should be the next layer if desired.
+```text
+A failure at token t occurs after token t completes and before token t+1 starts.
+```
+
+AeroKV protection direction:
+
+```text
+Source UAV i:
+  head overlap is stored/computed on pred(i)
+  tail snapshot is stored on succ(i)
+
+Holder UAV i:
+  stores/computes succ(i)'s head overlap
+  stores pred(i)'s tail snapshot
+```
+
+## Running experiments
+
+Experiment 1: overall end-to-end performance under the same failure trace.
+
+```bash
+PYTHONPATH=. python -m aerokv.experiments.exp1 --seed 2026 --output-dir outputs/exp1
+# or
+PYTHONPATH=. python -m aerokv.experiments.run_fig1_lifetime --seed 2026
+```
+
+Experiment 2: recovery communication overhead comparison.
+
+```bash
+PYTHONPATH=. python -m aerokv.experiments.exp2 --seed 2026 --output-dir outputs/exp2
+# or
+PYTHONPATH=. python -m aerokv.experiments.run_fig2_tradeoff --seed 2026
+```
+
+Experiment 3: ablation study.
+
+```bash
+PYTHONPATH=. python -m aerokv.experiments.exp3 --seed 2026 --output-dir outputs/exp3
+# or
+PYTHONPATH=. python -m aerokv.experiments.run_fig3_reconfiguration --seed 2026
+```
+
+## Outputs
+
+The recovery-enabled engine writes:
+
+```text
+summary.csv
+ token_trace.csv
+ uav_trace.csv
+ step_log.csv
+```
+
+`step_log.csv` is complete per-token logging. Console progress, when enabled, prints one concise line every 20 tokens.
 
 ## Tests
 
-Run:
-
 ```bash
-cd aerokv_rewrite_layer5
 PYTHONPATH=. pytest -q
 ```
 
-Expected result:
-
-```text
-20 passed
-```
+The current test suite checks memory accounting, recovery latency, P1 feasibility, P2 state constraints, ring direction conventions, and baseline/simulator behavior.

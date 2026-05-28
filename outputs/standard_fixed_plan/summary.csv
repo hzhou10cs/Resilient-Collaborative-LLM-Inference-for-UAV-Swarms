@@ -1,2 +1,0 @@
-run_id,method,seed,num_uavs,num_layers,n_est,failed_uav,failure_token,deadline_s,recovery_latency_s,deadline_met,reconfiguration_latency_s,remaining_completion_time_s,mission_complete_s,terminal_min_energy_j,protection_compute_energy_j,tx_energy_j,reconfiguration_energy_j,mission_success,invalid_reason,num_failures,failure_trace,expected_failures_per_task,total_recovery_latency_s
-standard-04a6ea4f,AeroKV,2026,12,60,4096,,,3.0,0.0,True,0.0,0.0,329.38469607076655,73466.1175391418,12867.458557639045,245.94369639630867,0.0,True,,0,[],,0.0
