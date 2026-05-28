@@ -30,6 +30,10 @@ def make_standard_system(seed: int = 2026, config=None) -> SystemSpec:
 
     cfg = config if config is not None else ExperimentConfig(seed=seed)
     rng = np.random.default_rng(cfg.seed if seed is None else seed)
+    for name in ("uav_memory_budget_gb", "uav_compute_latency_multipliers", "uav_link_mbps"):
+        values = getattr(cfg, name)
+        if values is not None and len(values) != cfg.num_uavs:
+            raise ValueError(f"{name} must have length num_uavs={cfg.num_uavs}")
     model = ModelSpec(
         num_layers=cfg.num_layers,
         hidden_size=cfg.hidden_size,
@@ -39,15 +43,28 @@ def make_standard_system(seed: int = 2026, config=None) -> SystemSpec:
         model_params_billion=cfg.model_params_billion,
         kv_bytes_per_token_layer_override=cfg.kv_bytes_per_token_layer,
     )
+    base_per_layer_latency_s = float(cfg.per_layer_latency_min_ms / 1000.0)
     uavs = tuple(
         UAVSpec(
             uav_id=i,
-            memory_budget_bytes=cfg.memory_budget_bytes,
+            memory_budget_bytes=(
+                cfg.memory_budget_bytes
+                if cfg.uav_memory_budget_gb is None
+                else float(cfg.uav_memory_budget_gb[i]) * GB
+            ),
             initial_energy_j=float(rng.uniform(*cfg.energy_budget_kj_range) * 1000.0),
             flight_power_w=float(cfg.flight_power_w),
             inference_power_w=float(cfg.inference_power_max_w),
-            per_layer_latency_s=float(cfg.per_layer_latency_min_ms / 1000.0),
-            link_bps=float(rng.uniform(*cfg.link_rate_mbps_range) * 1e6),
+            per_layer_latency_s=(
+                base_per_layer_latency_s
+                if cfg.uav_compute_latency_multipliers is None
+                else base_per_layer_latency_s * float(cfg.uav_compute_latency_multipliers[i])
+            ),
+            link_bps=(
+                float(rng.uniform(*cfg.link_rate_mbps_range) * 1e6)
+                if cfg.uav_link_mbps is None
+                else float(cfg.uav_link_mbps[i]) * 1e6
+            ),
             tx_power_w=cfg.tx_power_w,
         )
         for i in range(cfg.num_uavs)

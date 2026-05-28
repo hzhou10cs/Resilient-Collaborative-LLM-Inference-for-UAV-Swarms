@@ -1,5 +1,32 @@
 # Resilient Collaborative LLM Inference for UAV Swarms
 
+## Local changes compared with GitHub `main`
+
+This local checkout differs from `origin/main`. The changes were made to debug advisor-raised result inconsistencies and to bring the simulator closer to the paper's stated P1/P2 model.
+
+Main changes:
+
+- P2 now optimizes total chain latency, not maximum stage latency. The paper defines post-failure runtime as the sum of surviving stage latencies, so `p2_reconfiguration.py` was changed from a stage-balancing objective to a total-latency objective. P2 diagnostics now also show availability evidence, selected layer intervals, compute latency, activation-forward latency, total chain latency, and max stage latency.
+- `predicted_remaining_tokens` now uses one consistent formula for all methods: `min_i remaining_energy_j[i] / future_energy_per_token_j[i]`. This was changed because seed `100` showed SO and AeroKV with nearly identical energy and task time but a roughly 2x difference in predicted remaining tokens. The future-token estimate now uses the bottleneck UAV and includes flight, inference, live-overlap compute, snapshot/boundary TX, and activation forwarding.
+- The simulator now records more final per-UAV diagnostics in `uav_trace.csv`, including inference power, TX power, overlap power, snapshot/boundary power, total future power, per-token latency, energy per future token, and each UAV's predicted remaining token capacity.
+- AeroKV failure handling now records whether P2 and P1-new were valid, so failed recovery, failed P2, and failed P1-new states are easier to interpret consistently across methods.
+- P1, P1-new, and P2 print more detailed debug logs. These logs explain why candidates were accepted or rejected, what layer state is available after failure, and why a post-failure layout was selected.
+- Optional heterogeneous UAV profiles were added for debugging P2 behavior when UAVs have different compute speeds, link rates, and memory budgets.
+- New audit scripts and tests were added, including a seed sweep for `[0, 1, 2, 3, 10, 42, 100, 2026]` and regression tests for the P2 total-chain objective and the remaining-token invariant.
+
+Why these changes were made:
+
+- The recovery-latency math already matched the paper, but P2 previously used a max-stage objective while the paper describes a sum-of-stage objective.
+- Some experiment outputs were hard to explain because task time, remaining energy, and predicted remaining tokens were not transparent enough at the per-UAV level.
+- The seed `100` SO/AeroKV result suggested that `predicted_remaining_tokens` was being computed with an inconsistent future-energy denominator.
+
+Useful local files:
+
+- `aerokv/experiments/remaining_tokens_audit.py`: runs the remaining-token seed sweep and writes final per-UAV diagnostics.
+- `aerokv/experiments/p2_heterogeneous_compare.py`: compares selected P2, uniform layout, and no-reorganization behavior under heterogeneous UAV profiles.
+- `aerokv/tests/test_p2_total_chain_objective.py`: verifies that P2 minimizes total chain latency.
+- `aerokv/tests/test_expected_tokens.py`: verifies the bottleneck remaining-token formula and invariant.
+
 This repository contains a single-threaded simulator for evaluating resilient collaborative LLM inference over a logical UAV ring.  The current implementation compares four methods:
 
 - `NP`: no proactive protection; after a failure, the system performs hard recovery.

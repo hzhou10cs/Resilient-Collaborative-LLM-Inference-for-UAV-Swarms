@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from ..accounting import (
     activation_buffer_tokens_for_source,
+    average_snapshot_tx_bytes_per_token,
     effective_snapshot_period,
     latest_snapshot_token_for_source,
     live_overlap_layers_for_source,
@@ -61,6 +62,28 @@ class RecoverySimulationOutput:
     final_state: RuntimeState
     failure_events: tuple[FailureEvent, ...]
     recovery_results: tuple[RecoveryResult, ...]
+
+
+@dataclass(frozen=True)
+class FutureTokenDiagnostics:
+    uav_id: int
+    remaining_energy_j: float
+    exec_layers: int
+    overlap_layers: int
+    inference_power_w: float
+    tx_power_w: float
+    overlap_power_w: float
+    snapshot_boundary_power_w: float
+    total_future_power_w: float
+    per_token_latency_s: float
+    token_rate: float
+    execution_compute_energy_j: float
+    overlap_compute_energy_j: float
+    flight_energy_j: float
+    snapshot_boundary_energy_j: float
+    activation_forward_energy_j: float
+    energy_per_token_j: float
+    predicted_remaining_tokens_i: float
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +266,33 @@ def _snapshot_tx_bytes_for_alive_sources(
     return out
 
 
+def _average_snapshot_tx_bytes_for_alive_sources(
+    system: SystemSpec,
+    plan: ProtectionPlan,
+    alive: set[int],
+) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for source in alive:
+        if source not in plan.layout.intervals:
+            continue
+        dest = plan.ring.succ(source)
+        if dest not in alive:
+            continue
+        bytes_per_token = average_snapshot_tx_bytes_per_token(system, plan, source)
+        if bytes_per_token > 0.0:
+            out[source] = bytes_per_token
+    return out
+
+
+def _activation_forward_sources(plan: ProtectionPlan, alive: set[int]) -> set[int]:
+    executing = [
+        uav_id
+        for uav_id, interval in sorted(plan.layout.intervals.items(), key=lambda item: item[1].start)
+        if uav_id in alive and interval.width > 0
+    ]
+    return set(executing[:-1])
+
+
 def _apply_token_energy(
     system: SystemSpec,
     plan: ProtectionPlan,
@@ -350,6 +400,62 @@ def _refresh_dynamic_memory(
         state.drones[uav_id].memory_bytes = mem
 
 
+def _future_token_diagnostics_by_uav(
+    system: SystemSpec,
+    plan: ProtectionPlan,
+    state: RuntimeState,
+    pipeline_latency_s: float,
+    recovered_exec_layers_by_uav: dict[int, int],
+) -> dict[int, FutureTokenDiagnostics]:
+    alive = _alive_set(state)
+    exec_layers = _dynamic_exec_layers_by_uav(plan, alive, recovered_exec_layers_by_uav)
+    protection_layers = _dynamic_protection_layers_by_uav(plan, alive)
+    snapshot_tx = _average_snapshot_tx_bytes_for_alive_sources(system, plan, alive)
+    activation_forward_sources = _activation_forward_sources(plan, alive)
+
+    out: dict[int, FutureTokenDiagnostics] = {}
+    for uav_id in alive:
+        if uav_id not in plan.layout.intervals:
+            continue
+        uav = system.uav(uav_id)
+        inference_power = runtime_inference_power_w(system, uav_id, state.drones[uav_id].energy_j)
+        per_layer_latency = runtime_per_layer_latency_s(system, uav_id, state.drones[uav_id].energy_j)
+        flight_j = uav.flight_power_w * pipeline_latency_s
+        execution_compute_j = inference_power * exec_layers.get(uav_id, 0) * per_layer_latency
+        overlap_compute_j = inference_power * protection_layers.get(uav_id, 0) * per_layer_latency
+        tx_j = tx_energy_for_bytes_j(system, uav_id, snapshot_tx.get(uav_id, 0))
+        activation_j = (
+            tx_energy_for_bytes_j(system, uav_id, system.model.activation_bytes)
+            if uav_id in activation_forward_sources
+            else 0.0
+        )
+        energy_per_token = flight_j + execution_compute_j + overlap_compute_j + tx_j + activation_j
+        per_token_latency = pipeline_latency_s
+        token_rate = 0.0 if per_token_latency <= 0.0 else 1.0 / per_token_latency
+        denom = per_token_latency if per_token_latency > 0.0 else 1.0
+        out[uav_id] = FutureTokenDiagnostics(
+            uav_id=uav_id,
+            remaining_energy_j=state.drones[uav_id].energy_j,
+            exec_layers=exec_layers.get(uav_id, 0),
+            overlap_layers=protection_layers.get(uav_id, 0),
+            inference_power_w=inference_power,
+            tx_power_w=uav.tx_power_w,
+            overlap_power_w=overlap_compute_j / denom,
+            snapshot_boundary_power_w=tx_j / denom,
+            total_future_power_w=energy_per_token / denom,
+            per_token_latency_s=per_token_latency,
+            token_rate=token_rate,
+            execution_compute_energy_j=execution_compute_j,
+            overlap_compute_energy_j=overlap_compute_j,
+            flight_energy_j=flight_j,
+            snapshot_boundary_energy_j=tx_j,
+            activation_forward_energy_j=activation_j,
+            energy_per_token_j=energy_per_token,
+            predicted_remaining_tokens_i=_remaining_token_capacity(state.drones[uav_id].energy_j, energy_per_token),
+        )
+    return out
+
+
 def _energy_per_next_token_by_uav(
     system: SystemSpec,
     plan: ProtectionPlan,
@@ -357,23 +463,10 @@ def _energy_per_next_token_by_uav(
     pipeline_latency_s: float,
     recovered_exec_layers_by_uav: dict[int, int],
 ) -> dict[int, float]:
-    alive = _alive_set(state)
-    next_token = min(state.token + 1, system.model.n_est)
-    exec_layers = _dynamic_exec_layers_by_uav(plan, alive, recovered_exec_layers_by_uav)
-    protection_layers = _dynamic_protection_layers_by_uav(plan, alive)
-    snapshot_tx = _snapshot_tx_bytes_for_alive_sources(system, plan, next_token, alive)
-
-    out: dict[int, float] = {}
-    for uav_id in alive:
-        if uav_id not in plan.layout.intervals:
-            continue
-        uav = system.uav(uav_id)
-        flight_j = uav.flight_power_w * pipeline_latency_s
-        compute_layers = exec_layers.get(uav_id, 0) + protection_layers.get(uav_id, 0)
-        compute_j = runtime_inference_power_w(system, uav_id, state.drones[uav_id].energy_j) * compute_layers * runtime_per_layer_latency_s(system, uav_id, state.drones[uav_id].energy_j)
-        tx_j = tx_energy_for_bytes_j(system, uav_id, snapshot_tx.get(uav_id, 0))
-        out[uav_id] = flight_j + compute_j + tx_j
-    return out
+    diagnostics = _future_token_diagnostics_by_uav(
+        system, plan, state, pipeline_latency_s, recovered_exec_layers_by_uav
+    )
+    return {uav_id: row.energy_per_token_j for uav_id, row in diagnostics.items()}
 
 
 def _remaining_token_capacity(energy_j: float, energy_per_token_j: float) -> float:
@@ -410,7 +503,7 @@ def _apply_aerokv_p2_p1_new(
     recovery: RecoveryResult,
     *,
     beam_width: int = 256,
-) -> tuple[bool, str | None, float, float, dict[int, int], set[int]]:
+) -> tuple[bool, str | None, float, float, dict[int, int], set[int], bool, bool | None]:
     """Apply AeroKV P2 and P1-new after a successful recovery.
 
     Returns ``(valid, reason, reconfig_latency, reconfig_energy,
@@ -419,6 +512,17 @@ def _apply_aerokv_p2_p1_new(
     zero. The important state transition is the new layout/ring/protection plan.
     """
 
+    print(
+        f"[AeroKV][reconfiguration start] token={state.token} "
+        f"failed_uav={recovery.failure.failed_uav} alive_uavs={tuple(sorted(_alive_set(state)))}"
+    )
+    print(
+        f"[AeroKV][recovery evidence] live_owner={recovery.live_owner_uav} "
+        f"snapshot_owner={recovery.snapshot_owner_uav} live_head_layers={recovery.live_head_layers} "
+        f"snapshot_tail_layers={recovery.snapshot_tail_layers} "
+        f"latest_snapshot_token={recovery.latest_snapshot_token} "
+        f"replay_tokens={recovery.replay_tokens} recovery_latency_s={recovery.recovery_latency_s:.6f}"
+    )
     p2 = solve_p2_reconfiguration(
         system,
         state.protection_plan,
@@ -426,13 +530,16 @@ def _apply_aerokv_p2_p1_new(
         token=state.token,
         alive_uavs=_alive_set(state),
         recovered_intervals_by_uav=recovery.recovered_intervals_by_uav,
+        energy_by_uav_j={u: state.drones[u].energy_j for u in _alive_set(state)},
     )
     if not p2.valid or p2.layout is None:
-        return False, p2.invalid_reason or "p2_reconfiguration_failed", 0.0, 0.0, {}, set()
+        print(f"[AeroKV][P2 failed] reason={p2.invalid_reason or 'p2_reconfiguration_failed'}")
+        return False, p2.invalid_reason or "p2_reconfiguration_failed", 0.0, 0.0, {}, set(), False, None
 
     p1_new = solve_p1_new(system, p2, beam_width=beam_width)
     if not p1_new.valid or p1_new.plan is None or p1_new.surviving_ring is None:
-        return False, p1_new.invalid_reason or "p1_new_failed", 0.0, 0.0, {}, set()
+        print(f"[AeroKV][P1-new failed] reason={p1_new.invalid_reason or 'p1_new_failed'}")
+        return False, p1_new.invalid_reason or "p1_new_failed", 0.0, 0.0, {}, set(), True, False
 
     state.layout = p2.layout
     state.ring = p1_new.surviving_ring
@@ -447,7 +554,11 @@ def _apply_aerokv_p2_p1_new(
         share = reconfig_energy / len(alive)
         for u in alive:
             state.drones[u].energy_j -= share
-    return True, None, 0.0, reconfig_energy, {}, set()
+    print(
+        f"[AeroKV][reconfiguration success] token={state.token} "
+        f"new_ring={state.ring.uav_ids} reconfiguration_energy_j={reconfig_energy:.3f}"
+    )
+    return True, None, 0.0, reconfig_energy, {}, set(), True, True
 
 
 
@@ -564,6 +675,7 @@ def _make_uav_rows(
     stage_latency_by_uav: dict[int, float],
     recovered_exec_layers_by_uav: dict[int, int],
     expected_remaining_tokens_by_uav: dict[int, float],
+    future_diagnostics_by_uav: dict[int, FutureTokenDiagnostics] | None = None,
 ) -> list[UAVTraceRow]:
     rows: list[UAVTraceRow] = []
     alive = _alive_set(state)
@@ -577,6 +689,7 @@ def _make_uav_rows(
         snapshot_layers, latest, stale, buf = _snapshot_view_for_holder(
             plan, state.protection_runtime, state.token, uav_id, alive
         )
+        future = None if future_diagnostics_by_uav is None else future_diagnostics_by_uav.get(uav_id)
         rows.append(
             UAVTraceRow(
                 run_id=run_id,
@@ -603,6 +716,17 @@ def _make_uav_rows(
                 stage_latency_s=stage_latency_by_uav.get(uav_id, 0.0),
                 expected_remaining_tokens=expected_remaining_tokens_by_uav.get(uav_id, 0.0),
                 recovered_exec_layers=recovered_exec_layers_by_uav.get(uav_id, 0) if is_alive else 0,
+                inference_power_w=0.0 if future is None else future.inference_power_w,
+                tx_power_w=0.0 if future is None else future.tx_power_w,
+                overlap_power_w=0.0 if future is None else future.overlap_power_w,
+                snapshot_boundary_power_w=0.0 if future is None else future.snapshot_boundary_power_w,
+                total_future_power_w=0.0 if future is None else future.total_future_power_w,
+                per_token_latency_s=0.0 if future is None else future.per_token_latency_s,
+                token_rate=0.0 if future is None else future.token_rate,
+                energy_per_token_j=0.0 if future is None else future.energy_per_token_j,
+                predicted_remaining_tokens_i=0.0 if future is None else future.predicted_remaining_tokens_i,
+                activation_forward_energy_per_token_j=0.0 if future is None else future.activation_forward_energy_j,
+                snapshot_boundary_energy_per_token_j=0.0 if future is None else future.snapshot_boundary_energy_j,
             )
         )
     return rows
@@ -717,10 +841,15 @@ def simulate_fixed_plan_with_recovery(
     total_reconfiguration_latency_s = 0.0
     total_reconfiguration_energy_j = 0.0
     total_protection_compute_energy_j = 0.0
+    p2_valid: bool | None = None
+    p1_new_valid: bool | None = None
 
     initial_latency = protected_pipeline_latency_s(system, current_plan).pipeline_latency_s
     _refresh_dynamic_memory(system, current_plan, state, recovered_exec_layers_by_uav)
     initial_energy_per_token = _energy_per_next_token_by_uav(
+        system, current_plan, state, initial_latency, recovered_exec_layers_by_uav
+    )
+    initial_future_diagnostics = _future_token_diagnostics_by_uav(
         system, current_plan, state, initial_latency, recovered_exec_layers_by_uav
     )
     initial_expected_by_uav = _expected_remaining_tokens_by_uav(state, initial_energy_per_token)
@@ -732,7 +861,15 @@ def simulate_fixed_plan_with_recovery(
     ]
     stage0 = _dynamic_stage_latency_by_uav(system, current_plan, _alive_set(state), recovered_exec_layers_by_uav, {u: state.drones[u].energy_j for u in _alive_set(state)})
     uav_trace = _make_uav_rows(
-        run_id, current_plan.method, system, current_plan, state, stage0, recovered_exec_layers_by_uav, initial_expected_by_uav
+        run_id,
+        current_plan.method,
+        system,
+        current_plan,
+        state,
+        stage0,
+        recovered_exec_layers_by_uav,
+        initial_expected_by_uav,
+        initial_future_diagnostics,
     )
     step_log = [_make_step_log_row(run_id, state, failures_so_far)]
 
@@ -815,7 +952,16 @@ def simulate_fixed_plan_with_recovery(
 
             if enable_p2_p1_new and _method_is_aerokv(current_plan):
                 state.phase = "reconfiguring"
-                ok, reason, reconfig_latency, reconfig_energy, recovered_exec_layers_by_uav, failed_sources = (
+                (
+                    ok,
+                    reason,
+                    reconfig_latency,
+                    reconfig_energy,
+                    recovered_exec_layers_by_uav,
+                    failed_sources,
+                    p2_valid,
+                    p1_new_valid,
+                ) = (
                     _apply_aerokv_p2_p1_new(system, state, result)
                 )
                 total_reconfiguration_latency_s += reconfig_latency
@@ -855,8 +1001,17 @@ def simulate_fixed_plan_with_recovery(
 
         alive_after = _alive_set(state)
         stage = _dynamic_stage_latency_by_uav(system, current_plan, alive_after, recovered_exec_layers_by_uav, {u: state.drones[u].energy_j for u in alive_after})
-        next_latency = max(stage.values()) if stage else 0.0
+        next_latency = _dynamic_pipeline_latency_s(
+            system,
+            current_plan,
+            alive_after,
+            recovered_exec_layers_by_uav,
+            {u: state.drones[u].energy_j for u in alive_after},
+        )
         energy_per_next_token = _energy_per_next_token_by_uav(
+            system, current_plan, state, next_latency, recovered_exec_layers_by_uav
+        )
+        future_diagnostics = _future_token_diagnostics_by_uav(
             system, current_plan, state, next_latency, recovered_exec_layers_by_uav
         )
         expected_by_uav = _expected_remaining_tokens_by_uav(state, energy_per_next_token)
@@ -866,7 +1021,15 @@ def simulate_fixed_plan_with_recovery(
         )
         uav_trace.extend(
             _make_uav_rows(
-                run_id, current_plan.method, system, current_plan, state, stage, recovered_exec_layers_by_uav, expected_by_uav
+                run_id,
+                current_plan.method,
+                system,
+                current_plan,
+                state,
+                stage,
+                recovered_exec_layers_by_uav,
+                expected_by_uav,
+                future_diagnostics,
             )
         )
         log_row = _make_step_log_row(run_id, state, failures_so_far)
@@ -912,6 +1075,8 @@ def simulate_fixed_plan_with_recovery(
         expected_failures_per_task=expected_failures_per_task,
         total_recovery_latency_s=total_recovery_latency_s,
         final_system_expected_remaining_tokens=token_trace[-1].system_expected_remaining_tokens if token_trace else 0.0,
+        p2_valid=p2_valid,
+        p1_new_valid=p1_new_valid,
     )
 
     output = RecoverySimulationOutput(

@@ -114,19 +114,31 @@ def generate_p1_candidates(
 
     periods = _candidate_periods(system)
     shard_width = layout.interval(source_uav).width
+    print(
+        f"[P1][candidates] source_uav={source_uav} "
+        f"shard=[{layout.interval(source_uav).start},{layout.interval(source_uav).end}) "
+        f"shard_width={shard_width} periods={periods} deadline_s={system.tau_recover_max_s:.6f}"
+    )
     out: list[P1Candidate] = []
     for k in range(shard_width + 1):
         if k == shard_width:
             latency = 0.0
+            score = _candidate_local_score_j_per_token(
+                system, layout, ring, source_uav=source_uav, overlap_depth=k, snapshot_period=None
+            )
+            print(
+                f"[P1][candidate accepted] source_uav={source_uav} "
+                f"K={k} T_B=None reason=full_live_overlap "
+                f"worst_recovery_s={latency:.6f} "
+                f"local_score_j_per_token={score:.9f}"
+            )
             out.append(
                 P1Candidate(
                     source_uav=source_uav,
                     overlap_depth=k,
                     snapshot_period=None,
                     worst_recovery_latency_s=latency,
-                    local_score_j_per_token=_candidate_local_score_j_per_token(
-                        system, layout, ring, source_uav=source_uav, overlap_depth=k, snapshot_period=None
-                    ),
+                    local_score_j_per_token=score,
                 )
             )
             continue
@@ -140,19 +152,31 @@ def generate_p1_candidates(
                 snapshot_period=period,
             )
             if latency > system.tau_recover_max_s:
+                print(
+                    f"[P1][candidate rejected] source_uav={source_uav} "
+                    f"K={k} T_B={period} reason=recovery_deadline "
+                    f"worst_recovery_s={latency:.6f} deadline_s={system.tau_recover_max_s:.6f}"
+                )
                 continue
+            score = _candidate_local_score_j_per_token(
+                system, layout, ring, source_uav=source_uav, overlap_depth=k, snapshot_period=period
+            )
+            print(
+                f"[P1][candidate accepted] source_uav={source_uav} "
+                f"K={k} T_B={period} worst_recovery_s={latency:.6f} "
+                f"local_score_j_per_token={score:.9f}"
+            )
             out.append(
                 P1Candidate(
                     source_uav=source_uav,
                     overlap_depth=k,
                     snapshot_period=period,
                     worst_recovery_latency_s=latency,
-                    local_score_j_per_token=_candidate_local_score_j_per_token(
-                        system, layout, ring, source_uav=source_uav, overlap_depth=k, snapshot_period=period
-                    ),
+                    local_score_j_per_token=score,
                 )
             )
     out.sort(key=lambda c: (c.local_score_j_per_token, c.worst_recovery_latency_s, c.overlap_depth))
+    print(f"[P1][candidates summary] source_uav={source_uav} accepted_count={len(out)}")
     return tuple(out)
 
 
@@ -225,13 +249,26 @@ def solve_p1_provisioning(
         raise ValueError("beam_width must be positive")
     layout.validate_exact_cover(system.model.num_layers)
     sources = tuple(layout.intervals.keys())
+    print(
+        f"[P1][start] method={method} sources={sources} "
+        f"beam_width={beam_width} max_candidates_per_source={max_candidates_per_source}"
+    )
     candidates: dict[int, tuple[P1Candidate, ...]] = {}
     for source in sources:
         cs = generate_p1_candidates(system, layout, ring, source_uav=source)
         if max_candidates_per_source is not None:
             cs = cs[:max_candidates_per_source]
         candidates[source] = cs
+        print(f"[P1][candidate count] source_uav={source} count={len(cs)}")
+        for idx, cand in enumerate(cs, start=1):
+            print(
+                f"[P1][candidate list] source_uav={source} idx={idx} "
+                f"K={cand.overlap_depth} T_B={cand.snapshot_period} "
+                f"worst_recovery_s={cand.worst_recovery_latency_s:.6f} "
+                f"local_score_j_per_token={cand.local_score_j_per_token:.9f}"
+            )
         if not cs:
+            print(f"[P1][failed] reason=no_deadline_feasible_candidate_for_uav_{source}")
             return P1Result(
                 valid=False,
                 invalid_reason=f"no_deadline_feasible_candidate_for_uav_{source}",
@@ -260,6 +297,19 @@ def solve_p1_provisioning(
                 expanded.append((rough, nxt))
         expanded.sort(key=lambda item: item[0])
         beam = expanded[:beam_width]
+        best_score = beam[0][0] if beam else float("inf")
+        worst_kept_score = beam[-1][0] if beam else float("inf")
+        print(
+            f"[P1][beam] processed_source={source} expanded={len(expanded)} "
+            f"kept={len(beam)} best_rough_score={best_score:.9f} "
+            f"worst_kept_rough_score={worst_kept_score:.9f}"
+        )
+        for rank, (rough, choices) in enumerate(beam[:5], start=1):
+            choice_text = ", ".join(
+                f"u{u}:K={c.overlap_depth},T_B={c.snapshot_period}"
+                for u, c in sorted(choices.items())
+            )
+            print(f"[P1][beam top] processed_source={source} rank={rank} rough_score={rough:.9f} {choice_text}")
 
     best_plan: ProtectionPlan | None = None
     best_min_life = -1.0
@@ -275,16 +325,40 @@ def solve_p1_provisioning(
         plan.validate_against(system)
         memory_ok, deadline_ok, min_life, max_energy, max_memory = _evaluate_complete_plan(system, plan)
         if not memory_ok or not deadline_ok:
+            reason = "memory" if not memory_ok else "deadline"
+            print(
+                f"[P1][joint rejected] reason={reason} memory_ok={memory_ok} "
+                f"deadline_ok={deadline_ok} min_lifetime_s={min_life:.6f} "
+                f"max_energy_per_token_j={max_energy:.9f} max_memory_bytes={max_memory:.3f}"
+            )
             continue
         if min_life > best_min_life:
+            print(
+                f"[P1][new incumbent] min_lifetime_s={min_life:.6f} "
+                f"max_energy_per_token_j={max_energy:.9f} max_memory_bytes={max_memory:.3f}"
+            )
+            for u, cand in sorted(choices.items()):
+                print(
+                    f"[P1][incumbent choice] source_uav={u} "
+                    f"K={cand.overlap_depth} T_B={cand.snapshot_period} "
+                    f"worst_recovery_s={cand.worst_recovery_latency_s:.6f}"
+                )
             best_plan = plan
             best_min_life = min_life
             best_max_energy = max_energy
             best_max_memory = max_memory
             best_memory_ok = memory_ok
             best_deadline_ok = deadline_ok
+        else:
+            print(
+                f"[P1][joint feasible not chosen] reason=lower_min_lifetime "
+                f"candidate_min_lifetime_s={min_life:.6f} "
+                f"incumbent_min_lifetime_s={best_min_life:.6f} "
+                f"max_energy_per_token_j={max_energy:.9f} max_memory_bytes={max_memory:.3f}"
+            )
 
     if best_plan is None:
+        print("[P1][failed] reason=no_global_memory_and_deadline_feasible_plan_in_beam")
         return P1Result(
             valid=False,
             invalid_reason="no_global_memory_and_deadline_feasible_plan_in_beam",
@@ -297,6 +371,19 @@ def solve_p1_provisioning(
             candidates_by_source=candidates,
         )
 
+    print(
+        f"[P1][success] method={method} objective_min_lifetime_s={best_min_life:.6f} "
+        f"max_energy_per_token_j={best_max_energy:.9f} max_memory_bytes={best_max_memory:.3f} "
+        f"deadline_met={best_deadline_ok} memory_feasible={best_memory_ok}"
+    )
+    for u in sorted(best_plan.layout.intervals):
+        interval = best_plan.layout.interval(u)
+        print(
+            f"[P1][chosen] source_uav={u} shard=[{interval.start},{interval.end}) "
+            f"K={best_plan.head_overlap_depth[u]} T_B={best_plan.snapshot_period[u]} "
+            f"live_owner=pred({u})={best_plan.ring.pred(u)} "
+            f"snapshot_owner=succ({u})={best_plan.ring.succ(u)}"
+        )
     return P1Result(
         valid=True,
         invalid_reason=None,

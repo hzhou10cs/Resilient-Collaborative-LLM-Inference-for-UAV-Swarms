@@ -9,12 +9,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from aerokv.config import ExperimentConfig
+from aerokv.config import ExperimentConfig, make_heterogeneous_config
 from aerokv.experiments._common import (
     build_method_plans,
     build_standard_context,
     main_result_row,
     print_result_table,
+    print_uav_profiles,
     shared_failure_trace,
     write_dict_rows,
 )
@@ -28,9 +29,15 @@ MAIN_COLUMNS = [
 ]
 
 
-def run(seed: int = 2026, output_dir: str | Path = "outputs/exp1", print_progress: bool = True) -> list[dict[str, object]]:
-    cfg = ExperimentConfig(seed=seed)
+def run(
+    seed: int = 2026,
+    output_dir: str | Path = "outputs/exp1",
+    print_progress: bool = True,
+    heterogeneous: bool = False,
+) -> list[dict[str, object]]:
+    cfg = make_heterogeneous_config(seed=seed) if heterogeneous else ExperimentConfig(seed=seed)
     _, system, layout, ring = build_standard_context(seed, cfg)
+    print_uav_profiles(system, cfg)
     failures = shared_failure_trace(system, seed, cfg.expected_failures_per_task)
     plans = build_method_plans(system, layout, ring)
     out_root = Path(output_dir)
@@ -60,8 +67,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--output-dir", default="outputs/exp1")
     parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument("--heterogeneous", action="store_true")
     args = parser.parse_args()
-    run(args.seed, args.output_dir, not args.no_progress)
+    output_dir = args.output_dir
+    if args.heterogeneous and output_dir == "outputs/exp1":
+        output_dir = "outputs/exp1_heterogeneous_p2"
+    run(args.seed, output_dir, not args.no_progress, args.heterogeneous)
 
 
 if __name__ == "__main__":

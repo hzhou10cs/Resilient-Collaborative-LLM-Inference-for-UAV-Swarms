@@ -23,9 +23,15 @@ class ExperimentConfig:
     model_params_billion: float = 32.0
     kv_bytes_per_token_layer: int = 4 * KB
 
-    # UAV resources.
+    # Default homogeneous resources.
     memory_budget_gb: float = 12.0
     energy_budget_kj_range: tuple[float, float] = (1800.0, 3600.0)
+
+    # Optional heterogeneous profiles.
+    uav_memory_budget_gb: tuple[float, ...] | None = None
+    uav_compute_latency_multipliers: tuple[float, ...] | None = None
+    uav_link_mbps: tuple[float, ...] | None = None
+
     # Deterministic power/latency model. These are max-power hardware constants;
     # runtime inference power and per-layer latency are derived from residual energy.
     flight_power_w: float = 80.0
@@ -57,3 +63,30 @@ class ExperimentConfig:
 
 def make_default_config(seed: int = DEFAULT_SEED) -> ExperimentConfig:
     return ExperimentConfig(seed=seed)
+
+
+def make_heterogeneous_config(seed: int = DEFAULT_SEED) -> ExperimentConfig:
+    return ExperimentConfig(
+        seed=seed,
+        num_uavs=16,
+        num_layers=64,
+        memory_budget_gb=12.0,
+        uav_compute_latency_multipliers=(
+            0.75, 0.90, 1.20, 1.00,
+            0.70, 1.35, 1.10, 0.85,
+            1.50, 0.80, 1.25, 1.05,
+            0.65, 1.40, 0.95, 1.15,
+        ),
+        uav_link_mbps=(
+            30.0, 24.0, 18.0, 27.0,
+            22.0, 15.0, 20.0, 28.0,
+            16.0, 30.0, 19.0, 25.0,
+            29.0, 17.0, 26.0, 21.0,
+        ),
+        uav_memory_budget_gb=(
+            12.0, 12.0, 10.0, 12.0,
+            16.0, 10.0, 12.0, 14.0,
+            10.0, 16.0, 12.0, 12.0,
+            16.0, 10.0, 14.0, 12.0,
+        ),
+    )

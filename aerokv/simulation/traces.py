@@ -63,6 +63,17 @@ class UAVTraceRow:
     stage_latency_s: float
     expected_remaining_tokens: float
     recovered_exec_layers: int = 0
+    inference_power_w: float = 0.0
+    tx_power_w: float = 0.0
+    overlap_power_w: float = 0.0
+    snapshot_boundary_power_w: float = 0.0
+    total_future_power_w: float = 0.0
+    per_token_latency_s: float = 0.0
+    token_rate: float = 0.0
+    energy_per_token_j: float = 0.0
+    predicted_remaining_tokens_i: float = 0.0
+    activation_forward_energy_per_token_j: float = 0.0
+    snapshot_boundary_energy_per_token_j: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -116,6 +127,8 @@ class SummaryRow:
     expected_failures_per_task: float | None = None
     total_recovery_latency_s: float = 0.0
     final_system_expected_remaining_tokens: float = 0.0
+    p2_valid: bool | None = None
+    p1_new_valid: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -24,6 +24,25 @@ def build_standard_context(seed: int = 2026, config: ExperimentConfig | None = N
     return cfg, system, layout, ring
 
 
+def print_uav_profiles(system: SystemSpec, config: ExperimentConfig | None = None) -> None:
+    base_latency_s = None if config is None else config.per_layer_latency_min_ms / 1000.0
+    for uav in system.uavs:
+        if config is not None and config.uav_compute_latency_multipliers is not None:
+            multiplier = config.uav_compute_latency_multipliers[uav.uav_id]
+        elif base_latency_s is not None and base_latency_s > 0:
+            multiplier = uav.per_layer_latency_s / base_latency_s
+        else:
+            multiplier = 1.0
+        print(
+            f"[UAV][profile] id={uav.uav_id} "
+            f"compute_latency_multiplier={multiplier:.3f} "
+            f"per_layer_latency_s={uav.per_layer_latency_s:.9f} "
+            f"link_mbps={uav.link_bps / 1e6:.3f} "
+            f"memory_gb={uav.memory_budget_bytes / (1024 ** 3):.3f} "
+            f"energy_j={uav.initial_energy_j:.3f}"
+        )
+
+
 def build_method_plans(system: SystemSpec, layout, ring) -> dict[str, ProtectionPlan]:
     """Build the four experiment methods: NP, OO, SO, AeroKV."""
 
@@ -113,4 +132,30 @@ def main_result_row(output) -> dict[str, object]:
         "avg_remaining_energy_j": mean_residual_energy_j(final_uav_rows),
         "task_time_cost_s": cumulative_completion_time_s(output.token_trace),
         "predicted_remaining_tokens": output.summary.final_system_expected_remaining_tokens,
+    }
+
+
+def remaining_token_audit_row(output) -> dict[str, object]:
+    """Compact final-state audit row for predicted remaining tokens."""
+
+    from aerokv.simulation.metrics import (
+        cumulative_completion_time_s,
+        final_token_uav_rows,
+        mean_residual_energy_j,
+    )
+
+    final_uav_rows = final_token_uav_rows(output.uav_trace)
+    alive = [r for r in final_uav_rows if r.uav_status != "failed"]
+    bottleneck = min(alive, key=lambda r: r.predicted_remaining_tokens_i) if alive else None
+    return {
+        "method": output.summary.method,
+        "avg_remaining_energy_j": mean_residual_energy_j(final_uav_rows),
+        "min_remaining_energy_j": min((r.energy_j for r in alive), default=0.0),
+        "bottleneck_uav": None if bottleneck is None else bottleneck.uav_id,
+        "future_energy_per_token_j_at_bottleneck": 0.0 if bottleneck is None else bottleneck.energy_per_token_j,
+        "predicted_remaining_tokens": output.summary.final_system_expected_remaining_tokens,
+        "task_time_cost_s": cumulative_completion_time_s(output.token_trace),
+        "failure_status": output.summary.invalid_reason or ("success" if output.summary.mission_success else "incomplete"),
+        "p1_new_valid": output.summary.p1_new_valid,
+        "p2_valid": output.summary.p2_valid,
     }

@@ -38,7 +38,12 @@ def solve_p1_new(
     execution order.
     """
 
+    print(
+        f"[P1-new][start] p2_valid={p2_result.valid} "
+        f"active_uavs={p2_result.active_uavs} method={method}"
+    )
     if not p2_result.valid or p2_result.layout is None:
+        print(f"[P1-new][failed] reason={p2_result.invalid_reason or 'invalid_p2_result'}")
         return P1NewResult(
             valid=False,
             invalid_reason=p2_result.invalid_reason or "invalid_p2_result",
@@ -47,6 +52,7 @@ def solve_p1_new(
             surviving_ring=None,
         )
     if len(p2_result.active_uavs) < 2:
+        print("[P1-new][failed] reason=p1_new_requires_at_least_two_surviving_uavs")
         return P1NewResult(
             valid=False,
             invalid_reason="p1_new_requires_at_least_two_surviving_uavs",
@@ -56,6 +62,10 @@ def solve_p1_new(
         )
 
     ring = LogicalRing(tuple(p2_result.active_uavs))
+    print(f"[P1-new][ring] surviving_ring={ring.uav_ids}")
+    for uav_id in p2_result.active_uavs:
+        interval = p2_result.layout.interval(uav_id)
+        print(f"[P1-new][input layout] uav={uav_id} layers=[{interval.start},{interval.end})")
     p1 = solve_p1_provisioning(
         system,
         p2_result.layout,
@@ -64,6 +74,18 @@ def solve_p1_new(
         beam_width=beam_width,
         max_candidates_per_source=max_candidates_per_source,
     )
+    if p1.valid and p1.plan is not None:
+        print("[P1-new][success] rebuilt protection on P2 layout")
+        for uav_id in p1.plan.layout.intervals:
+            interval = p1.plan.layout.interval(uav_id)
+            print(
+                f"[P1-new][chosen] source_uav={uav_id} shard=[{interval.start},{interval.end}) "
+                f"K={p1.plan.head_overlap_depth[uav_id]} T_B={p1.plan.snapshot_period[uav_id]} "
+                f"live_owner=pred({uav_id})={p1.plan.ring.pred(uav_id)} "
+                f"snapshot_owner=succ({uav_id})={p1.plan.ring.succ(uav_id)}"
+            )
+    else:
+        print(f"[P1-new][failed] reason={p1.invalid_reason}")
     return P1NewResult(
         valid=p1.valid,
         invalid_reason=p1.invalid_reason,
@@ -85,8 +107,14 @@ def solve_p1_new_for_layout(
     """Convenience wrapper when the caller already has a post-failure layout."""
 
     if len(active_uavs) < 2:
+        print("[P1-new][failed] reason=p1_new_requires_at_least_two_surviving_uavs")
         return P1NewResult(False, "p1_new_requires_at_least_two_surviving_uavs", None, None, None)
     ring = LogicalRing(active_uavs)
+    print(f"[P1-new][start] active_uavs={active_uavs} method={method}")
+    print(f"[P1-new][ring] surviving_ring={ring.uav_ids}")
+    for uav_id in active_uavs:
+        interval = layout.interval(uav_id)
+        print(f"[P1-new][input layout] uav={uav_id} layers=[{interval.start},{interval.end})")
     p1 = solve_p1_provisioning(
         system,
         layout,
@@ -95,4 +123,16 @@ def solve_p1_new_for_layout(
         beam_width=beam_width,
         max_candidates_per_source=max_candidates_per_source,
     )
+    if p1.valid and p1.plan is not None:
+        print("[P1-new][success] rebuilt protection on provided layout")
+        for uav_id in p1.plan.layout.intervals:
+            interval = p1.plan.layout.interval(uav_id)
+            print(
+                f"[P1-new][chosen] source_uav={uav_id} shard=[{interval.start},{interval.end}) "
+                f"K={p1.plan.head_overlap_depth[uav_id]} T_B={p1.plan.snapshot_period[uav_id]} "
+                f"live_owner=pred({uav_id})={p1.plan.ring.pred(uav_id)} "
+                f"snapshot_owner=succ({uav_id})={p1.plan.ring.succ(uav_id)}"
+            )
+    else:
+        print(f"[P1-new][failed] reason={p1.invalid_reason}")
     return P1NewResult(p1.valid, p1.invalid_reason, p1.plan, p1, ring)
